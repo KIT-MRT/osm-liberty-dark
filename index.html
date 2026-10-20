@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OSM Liberty Dark</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.22.0/dist/maplibre-gl.css">
+  <script src="https://unpkg.com/maplibre-gl@5.22.0/dist/maplibre-gl.js"></script>
+  <style>
+    :root { color-scheme: dark; }
+    html, body, #map { margin: 0; height: 100%; background: #0b1016; }
+    body { font: 13px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #e6edf3; }
+    .panel {
+      position: absolute; top: 12px; left: 12px; z-index: 1;
+      max-width: calc(100% - 48px); padding: 10px 12px;
+      background: #121a23; border: 1px solid rgba(148, 163, 184, 0.14); border-radius: 8px;
+    }
+    .panel h1 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+    .panel .row { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+    .muted { color: #9aa7b4; }
+    button {
+      padding: 2px 9px; font: inherit; color: #e6edf3; cursor: pointer;
+      background: #17212c; border: 1px solid rgba(148, 163, 184, 0.14); border-radius: 6px;
+    }
+    button:hover { border-color: #6b7885; }
+    input[type=range] { width: 120px; accent-color: #38bdf8; }
+    .maplibregl-ctrl-attrib.maplibregl-compact, .maplibregl-ctrl-attrib { background: rgba(18, 26, 35, 0.85); color: #9aa7b4; }
+    .maplibregl-ctrl-attrib a { color: #9aa7b4; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div class="panel">
+  <h1>osm-liberty-dark</h1>
+  <div class="row">Zoom
+    <button data-zoom="12">12</button><button data-zoom="15">15</button><button data-zoom="17">17</button>
+    <span class="muted" id="zoom"></span>
+  </div>
+  <div class="row">Driven <input id="driven" type="range" min="0" max="1" step="0.01"></div>
+  <div class="muted" id="mode"></div>
+</div>
+<script>
+  // Query parameters:
+  //   ?route=<url>     GeoJSON LineString/Feature/FeatureCollection (or [[lon,lat],...]) to draw
+  //   ?driven=0..1     share of the route drawn as already driven
+  //   ?raster=<xyz>    show server-rendered raster tiles instead of the vector style, e.g.
+  //                    http://localhost:8080/styles/osm-liberty-dark/{z}/{x}/{y}.png (&tileSize=512)
+  // The view is kept in the URL hash (#zoom/lat/lon).
+  const params = new URLSearchParams(location.search);
+
+  // Hand-placed sample near KIT Campus Süd, Karlsruhe: Adenauerring -> Durlacher Tor ->
+  // Durlacher Allee. Approximate, not snapped to the road network.
+  const SAMPLE_ROUTE = [
+    [8.4160, 49.0151], [8.4171, 49.0144], [8.4175, 49.0132], [8.4174, 49.0118],
+    [8.4170, 49.0103], [8.4167, 49.0092], [8.4210, 49.0083], [8.4262, 49.0074],
+    [8.4318, 49.0065], [8.4380, 49.0055], [8.4440, 49.0045]
+  ];
+
+  // Route overlay as drawn by the route selector UI.
+  const ROUTE = {
+    casing: '#6b7885', track: '#17212c', drivenFrom: '#38bdf8', drivenTo: '#34d399',
+    startRing: '#9aa7b4', goalRing: '#34d399', markerFill: '#121a23'
+  };
+
+  const ATTRIBUTION = '<a href="https://openmaptiles.org/">© OpenMapTiles</a> ' +
+    '<a href="https://www.openstreetmap.org/copyright">© OpenStreetMap contributors</a>';
+
+  async function vectorStyle() {
+    const style = await (await fetch('style.json')).json();
+    // Mirror the tile server install: raster sources (relief shading) are dropped.
+    for (const [id, source] of Object.entries(style.sources)) {
+      if (source.type === 'raster') delete style.sources[id];
+    }
+    style.layers = style.layers.filter(layer => !layer.source || style.sources[layer.source]);
+    style.sources.openmaptiles = { type: 'vector', url: 'https://tiles.openfreemap.org/planet' };
+    style.sprite = new URL('sprites/osm-liberty-dark', location.href).href;
+    return style;
+  }
+
+  function rasterStyle(template) {
+    return {
+      version: 8,
+      sources: {
+        raster: {
+          type: 'raster', tiles: [template], attribution: ATTRIBUTION,
+          tileSize: Number(params.get('tileSize') || 256)
+        }
+      },
+      layers: [
+        { id: 'background', type: 'background', paint: { 'background-color': '#0b1016' } },
+        { id: 'raster', type: 'raster', source: 'raster' }
+      ]
+    };
+  }
+
+  function coordsOf(geojson) {
+    if (Array.isArray(geojson)) return geojson;
+    if (geojson.type === 'FeatureCollection') return coordsOf(geojson.features[0]);
+    if (geojson.type === 'Feature') return coordsOf(geojson.geometry);
+    if (geojson.type === 'LineString') return geojson.coordinates;
+    if (geojson.type === 'MultiLineString') return geojson.coordinates.flat();
+    throw new Error('Unsupported route GeoJSON: ' + geojson.type);
+  }
+
+  function meters(a, b) {
+    const k = Math.cos((a[1] + b[1]) / 2 * Math.PI / 180);
+    return Math.hypot((b[0] - a[0]) * k, b[1] - a[1]) * 111320;
+  }
+
+  // Leading part of the line covering `fraction` of its length.
+  function head(coords, fraction) {
+    const total = coords.slice(1).reduce((sum, c, i) => sum + meters(coords[i], c), 0);
+    let left = total * fraction;
+    const out = [coords[0]];
+    for (let i = 1; i < coords.length; i++) {
+      const d = meters(coords[i - 1], coords[i]);
+      if (d >= left) {
+        const t = d ? left / d : 0;
+        out.push([0, 1].map(k => coords[i - 1][k] + t * (coords[i][k] - coords[i - 1][k])));
+        return out;
+      }
+      left -= d;
+      out.push(coords[i]);
+    }
+    return out;
+  }
+
+  function line(coords) {
+    return { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } };
+  }
+
+  function point(coords, kind) {
+    return { type: 'Feature', properties: { kind }, geometry: { type: 'Point', coordinates: coords } };
+  }
+
+  let route = SAMPLE_ROUTE;
+  let driven = Number(params.get('driven') ?? 0.45);
+
+  function updateDriven() {
+    map.getSource('route-driven')?.setData(line(head(route, Math.max(driven, 0.001))));
+  }
+
+  function updateRoute() {
+    if (!map.getSource('route')) return;
+    map.getSource('route').setData(line(route));
+    updateDriven();
+    map.getSource('route-ends').setData({
+      type: 'FeatureCollection',
+      features: [point(route[0], 'start'), point(route[route.length - 1], 'goal')]
+    });
+  }
+
+  function addRouteLayers() {
+    const empty = { type: 'FeatureCollection', features: [] };
+    map.addSource('route', { type: 'geojson', data: empty });
+    map.addSource('route-driven', { type: 'geojson', data: empty, lineMetrics: true });
+    map.addSource('route-ends', { type: 'geojson', data: empty });
+    const round = { 'line-cap': 'round', 'line-join': 'round' };
+    map.addLayer({
+      id: 'route-casing', type: 'line', source: 'route', layout: round,
+      paint: { 'line-color': ROUTE.casing, 'line-width': 11, 'line-opacity': 0.8 }
+    });
+    map.addLayer({
+      id: 'route-track', type: 'line', source: 'route', layout: round,
+      paint: { 'line-color': ROUTE.track, 'line-width': 7 }
+    });
+    map.addLayer({
+      id: 'route-driven', type: 'line', source: 'route-driven', layout: round,
+      paint: {
+        'line-width': 7,
+        'line-gradient': ['interpolate', ['linear'], ['line-progress'], 0, ROUTE.drivenFrom, 1, ROUTE.drivenTo]
+      }
+    });
+    map.addLayer({
+      id: 'route-ends', type: 'circle', source: 'route-ends',
+      paint: {
+        'circle-radius': 6,
+        'circle-color': ROUTE.markerFill,
+        'circle-stroke-width': 3,
+        'circle-stroke-color': ['match', ['get', 'kind'], 'goal', ROUTE.goalRing, ROUTE.startRing]
+      }
+    });
+    updateRoute();
+  }
+
+  let map;
+  (async () => {
+    const raster = params.get('raster');
+    map = new maplibregl.Map({
+      container: 'map',
+      style: raster ? rasterStyle(raster) : await vectorStyle(),
+      center: [8.4172, 49.0144],
+      zoom: 14,
+      hash: true,
+      attributionControl: {
+        customAttribution: 'Style: <a href="https://github.com/KIT-MRT/osm-liberty-dark/tree/dark">OSM Liberty Dark</a>, ' +
+          'derived from <a href="https://github.com/maputnik/osm-liberty">OSM Liberty</a> / OSM Bright'
+      }
+    });
+    window.map = map;
+    map.on('load', addRouteLayers);
+    document.getElementById('mode').textContent = raster ? 'raster tiles: ' + raster : 'vector tiles: OpenFreeMap';
+
+    if (params.get('route')) {
+      route = coordsOf(await (await fetch(params.get('route'))).json());
+      updateRoute();
+      if (!location.hash) {
+        const bounds = route.reduce((b, c) => b.extend(c), new maplibregl.LngLatBounds(route[0], route[0]));
+        map.fitBounds(bounds, { padding: 60, duration: 0 });
+      }
+    }
+
+    const slider = document.getElementById('driven');
+    slider.value = driven;
+    slider.addEventListener('input', () => { driven = Number(slider.value); updateDriven(); });
+    for (const button of document.querySelectorAll('[data-zoom]')) {
+      button.addEventListener('click', () => map.easeTo({ zoom: Number(button.dataset.zoom) }));
+    }
+    const zoom = document.getElementById('zoom');
+    const showZoom = () => { zoom.textContent = 'z ' + map.getZoom().toFixed(1); };
+    map.on('zoom', showZoom);
+    showZoom();
+  })();
+</script>
+</body>
+</html>
