@@ -1,7 +1,7 @@
 {
-  "name": "osm-liberty",
+  "name": "osm-liberty-dark",
   "version": "0.1.0",
-  "description": "A free Mapbox GL basemap style for everyone",
+  "description": "A dark variant of the OSM Liberty MapLibre basemap style",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "validate": "./node_modules/.bin/gl-style-validate style.json",
@@ -11,7 +11,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/maputnik/osm-liberty.git"
+    "url": "git+https://github.com/KIT-MRT/osm-liberty-dark.git"
   },
   "keywords": [
     "maps",
@@ -21,9 +21,9 @@
   ],
   "author": "",
   "bugs": {
-    "url": "https://github.com/maputnik/osm-liberty/issues"
+    "url": "https://github.com/KIT-MRT/osm-liberty-dark/issues"
   },
-  "homepage": "https://github.com/maputnik/osm-liberty#readme",
+  "homepage": "https://github.com/KIT-MRT/osm-liberty-dark/tree/dark#readme",
   "devDependencies": {
     "@maplibre/maplibre-gl-style-spec": "^26.4.4",
     "husky": "^9.1.5"
