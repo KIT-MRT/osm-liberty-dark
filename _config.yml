@@ -1,6 +1,6 @@
 # Site settings
-title: OSM Liberty
+title: OSM Liberty Dark
 email: me@lukasmartinelli.ch
-description: A free Mapbox GL basemap based on open data
+description: A dark variant of the OSM Liberty basemap
 baseurl: ""
 markdown: kramdown
